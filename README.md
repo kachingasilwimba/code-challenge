@@ -1,4 +1,4 @@
-# Weather Data Engineering Coding Exercise (SQLite + FastAPI)
+# Weather Data Engineering Coding Exercise
 
 This repository contains my solution to the weather data engineering coding exercise.
 
