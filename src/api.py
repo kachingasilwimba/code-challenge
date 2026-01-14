@@ -3,12 +3,14 @@ from __future__ import annotations
 from fastapi import FastAPI, Query, Depends
 from pydantic import BaseModel
 import sqlite3
+import os
 from pathlib import Path
 from typing import Optional
 
 from .db import connect, init_db
 
-DEFAULT_DB = Path("weather.db")
+# DEFAULT_DB = Path("weather.db")
+DEFAULT_DB = Path(os.environ.get("WEATHER_DB_PATH", "weather.db"))
 
 app = FastAPI(title="Weather API", version="1.0.0")
 
