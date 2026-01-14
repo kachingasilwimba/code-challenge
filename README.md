@@ -25,7 +25,11 @@ In addition to the required JSON endpoints, the API includes an optional PNG plo
 
 ----
 ## Quickstart 
+
 **Setup:**
+
+``git clone git@github.com:kachingasilwimba/code-challenge.git``
+
 ``pip install -r requirements.txt``
 
 **Initialize + Ingest (Problem 2):**
