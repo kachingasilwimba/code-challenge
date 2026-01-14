@@ -1,8 +1,6 @@
 # Weather Data Engineering Coding Exercise
 
-This repository contains my solution to the weather data engineering coding exercise.
-
-It implements:
+This repository contains the weather data engineering coding exercise implementations:
 
 - **Problem 1 – Data Modeling:** SQLite schema for raw observations, ingestion audit, and yearly stats  
 - **Problem 2 – Ingestion:** Script to ingest raw station text files into SQLite with duplicate protection and logging  
