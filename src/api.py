@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query, Depends
+from fastapi import FastAPI, Query, Depends, HTTPException
 from pydantic import BaseModel
 import sqlite3
 import os
 from pathlib import Path
 from typing import Optional
 from .db import connect, init_db
+
+## Plot
+from fastapi.responses import StreamingResponse
+import io
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from typing import Literal
+from datetime import date, timedelta
 
 
 # ------------------------------------------------------------
@@ -158,6 +167,7 @@ def get_weather(
     return {"count": total, "limit": limit, "offset": offset, "results": results}
 
 
+
 # ------------------------------------------------------------
 # Endpoint: /api/weather/stats
 # Returns computed yearly statistics.
@@ -210,3 +220,176 @@ def get_stats(
     results = [StatsRow(**dict(r)).model_dump() for r in rows]
 
     return {"count": total, "limit": limit, "offset": offset, "results": results}
+
+# ------------------------------------------------------------
+# Endpoint: /api/weather/stats/plots
+# Returns computed yearly statistics.
+# Filters:
+#  - station_id
+#  - year
+# Pagination:
+#  - limit, offset
+# ------------------------------------------------------------
+@app.get("/api/weather/plot")
+def plot_weather(
+    station_id: str = Query(..., description="Station ID (required)"),
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD (required for daily)"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD (required for daily)"),
+    granularity: Literal["monthly", "yearly", "daily"] = Query(
+        "monthly", description="monthly (fast), yearly (fast), daily (slow unless range is small)"
+    ),
+    metric: Literal["temperature", "precip", "both"] = Query(
+        "temperature", description="temperature, precip, or both (precip uses right axis)"
+    ),
+    max_points: int = Query(2000, ge=100, le=20000, description="Only used for daily plots"),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """
+    Returns a PNG plot.
+
+    Performance choices:
+      - Default granularity is monthly (fast).
+      - yearly is very fast.
+      - daily requires date_from & date_to and is downsampled to max_points.
+    """
+
+    #------------ Helper to build optional date filters
+    where = ["station_id = ?"]
+    params: list = [station_id]
+
+    #------------ For daily, require a date range so we don't plot millions of points
+    if granularity == "daily":
+        if not date_from or not date_to:
+            raise HTTPException(status_code=400, detail="date_from and date_to are required for granularity=daily")
+    else:
+        # If user doesn't provide dates for monthly/yearly, optionally default to "all time".
+        # If you prefer a default window, uncomment below:
+        # if not date_from or not date_to:
+        #     end = date.today()
+        #     start = end - timedelta(days=365 * 5)
+        #     date_from = start.isoformat()
+        #     date_to = end.isoformat()
+        pass
+
+    if date_from:
+        where.append("obs_date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("obs_date <= ?")
+        params.append(date_to)
+
+    where_sql = " AND ".join(where)
+
+    if granularity == "daily":
+        rows = conn.execute(
+            f"""
+            SELECT obs_date AS period,
+                   max_temp_tenth_c,
+                   min_temp_tenth_c,
+                   precip_tenth_mm
+            FROM weather_observation
+            WHERE {where_sql}
+            ORDER BY obs_date
+            """,
+            params,
+        ).fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No data found for given filters")
+
+        n = len(rows)
+        step = max(1, n // max_points)
+        rows = rows[::step]
+
+        periods = [r["period"] for r in rows]
+        tmax = [(r["max_temp_tenth_c"] / 10.0) if r["max_temp_tenth_c"] is not None else None for r in rows]
+        tmin = [(r["min_temp_tenth_c"] / 10.0) if r["min_temp_tenth_c"] is not None else None for r in rows]
+        precip = [(r["precip_tenth_mm"] / 100.0) if r["precip_tenth_mm"] is not None else None for r in rows]  # cm
+
+        title_suffix = f"Daily (downsample step={step})"
+
+    elif granularity == "monthly":
+        rows = conn.execute(
+            f"""
+            SELECT substr(obs_date, 1, 7) AS period,         -- YYYY-MM
+                   AVG(max_temp_tenth_c)/10.0 AS avg_tmax_c,
+                   AVG(min_temp_tenth_c)/10.0 AS avg_tmin_c,
+                   SUM(precip_tenth_mm)/100.0 AS total_precip_cm
+            FROM weather_observation
+            WHERE {where_sql}
+            GROUP BY substr(obs_date, 1, 7)
+            ORDER BY period
+            """,
+            params,
+        ).fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No data found for given filters")
+
+        periods = [r["period"] for r in rows]
+        tmax = [r["avg_tmax_c"] for r in rows]
+        tmin = [r["avg_tmin_c"] for r in rows]
+        precip = [r["total_precip_cm"] for r in rows]
+
+        title_suffix = "Monthly"
+
+    else:  #------------ yearly
+        rows = conn.execute(
+            f"""
+            SELECT substr(obs_date, 1, 4) AS period,         -- YYYY
+                   AVG(max_temp_tenth_c)/10.0 AS avg_tmax_c,
+                   AVG(min_temp_tenth_c)/10.0 AS avg_tmin_c,
+                   SUM(precip_tenth_mm)/100.0 AS total_precip_cm
+            FROM weather_observation
+            WHERE {where_sql}
+            GROUP BY substr(obs_date, 1, 4)
+            ORDER BY period
+            """,
+            params,
+        ).fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No data found for given filters")
+
+        periods = [r["period"] for r in rows]
+        tmax = [r["avg_tmax_c"] for r in rows]
+        tmin = [r["avg_tmin_c"] for r in rows]
+        precip = [r["total_precip_cm"] for r in rows]
+
+        title_suffix = "Yearly"
+
+    fig, ax1 = plt.subplots()
+
+    if metric in ("temperature", "both"):
+        ax1.plot(periods, tmax, label="Tmax (°C)",linewidth=3,marker ="o",markersize=6)
+        ax1.plot(periods, tmin, label="Tmin (°C)",linestyle='dashdot', linewidth=3)
+        ax1.set_ylabel("Temperature (°C)")
+
+    ax2 = None
+    if metric in ("precip", "both"):
+        ax2 = ax1.twinx()
+        ax2.plot(periods, precip, label="Precip (cm)")
+        ax2.set_ylabel("Precipitation (cm)")
+
+    ax1.set_title(f"Station {station_id} — {title_suffix}")
+    ax1.set_xlabel("Period")
+    ax1.minorticks_on()
+
+    if len(periods) > 12:
+        tick_step = max(1, len(periods) // 10)
+        ax1.set_xticks(ax1.get_xticks()[::1])
+    fig.autofmt_xdate()
+
+    handles, labels = ax1.get_legend_handles_labels()
+    if ax2 is not None:
+        h2, l2 = ax2.get_legend_handles_labels()
+        handles += h2
+        labels += l2
+    ax1.legend(handles, labels, loc="best")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+
+    return StreamingResponse(buf, media_type="image/png")
